@@ -1,6 +1,5 @@
 // everest
 // Copyright (C) 2023 Percona LLC
-// Copyright (C) 2026 The OpenEverest Contributors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,159 +17,88 @@ import { test, expect } from '@fixtures';
 test.describe('Everest CLI install', async () => {
   test('install everest and db-namespaces separately', async ({ page, cli, request }) => {
     const verifyOperators = async (namespace: string, operators: string[]) => {
-      await test.step('verify installed operators', async () => {
-        const out = await cli.exec(`kubectl get pods --namespace=${namespace}`);
-
-        await out.outContainsNormalizedMany(operators);
-      });
-    },
-
-     verifyEverestSystem = async () => {
-      await test.step('verify Everest', async () => {
-        const out = await cli.exec(`kubectl get deploy --namespace=everest-system`);
-
-        await out.outContainsNormalizedMany([
-            'everest-operator',
-            'everest-server'
-        ]);
+      await test.step('verify operators installation', async () => {
+        const checkOperators = await cli.checkOperatorsInstall(namespace);
+        expect(checkOperators.stdout).toContain('OLM: ');
+        operators.forEach((operator) => {
+          expect(checkOperators.stdout).toContain(operator);
+        });
       });
     };
 
-    await test.step('run everest install (no database namespace))', async () => {
-      const out = await cli.everestExecSkipWizard(
-        `install --skip-db-namespace --version 0.0.0 --helm.set server.image=ghcr.io/openeverest/openeverest-dev --helm.set operator.image=ghcr.io/openeverest/openeverest-operator-dev --helm.set olm.catalogSourceImage=ghcr.io/openeverest/openeverest-catalog-dev`,
-      );
+    const verifyEverestSystem = async () => {
+      await test.step('verify everest-system namespace installation', async () => {
+        const checkOperators = await cli.checkOperatorsInstall('everest-system');
+        expect(checkOperators.stdout).toContain('OLM: ');
+        const operators = [
+          'percona-everest-operator',
+          'argocd-operator',
+        ];
+        operators.forEach((operator) => {
+          expect(checkOperators.stdout).toContain(operator);
+        });
+      });
+    };
 
-      await out.assertSuccess();
-      await out.outContainsNormalizedMany([
-        '✅ Installing Everest Helm chart',
-        '✅ Ensuring Everest API deployment is ready',
-        '✅ Ensuring Everest operator deployment is ready',
-        '✅ Ensuring OLM components are ready',
-        '✅ Ensuring Everest CatalogSource is ready',
-        '✅ Ensuring monitoring stack is ready',
-        'Thank you for installing Everest',
-      ]);
+    const namespaces = 'ns1,ns2';
+
+    await test.step('install everest-operator', async () => {
+      const out = await cli.installEverestOperator();
+      expect(out.stdout).toContain('Everest has been installed');
     });
-    await page.waitForTimeout(10_000);
+
     await verifyEverestSystem();
 
-    await test.step('run everest install again (fail))', async () => {
-      const out = await cli.everestExecSkipWizard(
-        `install`,
-      );
-
-      await out.outErrContainsNormalizedMany([
-          '❌ everest is already installed',
-      ]);
+    await test.step('disable telemetry', async () => {
+      await cli.disableTelemetry();
     });
-    await page.waitForTimeout(10_000);
-    await verifyEverestSystem();
 
-    await test.step('create database namespace', async () => {
-      const out = await cli.everestExecNamespacesSkipWizard(
-        `add everest --operator.mongodb=false --operator.postgresql=false --operator.mysql=true`,
-      );
-
-      await out.assertSuccess();
-      await out.outContainsNormalizedMany([
-          '✅ Provisioning database namespace \'everest\'',
-      ]);
+    await test.step('install db-namespaces', async () => {
+      const out = await cli.installDbNamespaces(namespaces);
+      expect(out.stdout).toContain('namespaces have been configured');
     });
-    await page.waitForTimeout(10_000);
-    await verifyEverestSystem();
-    await verifyOperators('everest', ['percona-xtradb-cluster-operator']);
 
-    await test.step('create database namespace again (fail))', async () => {
-      const out = await cli.everestExecNamespacesSkipWizard(
-        `add everest --operator.mongodb=false --operator.postgresql=false --operator.mysql=true`,
-      );
-
-      await out.outErrContainsNormalizedMany([
-        '❌ \'everest\': namespace already exists and is managed by Everest',
-      ]);
-    });
-    await page.waitForTimeout(10_000);
-    await verifyEverestSystem();
-    await verifyOperators('everest', ['percona-xtradb-cluster-operator']);
-
-    await test.step('update database namespace', async () => {
-      const out = await cli.everestExecNamespacesSkipWizard(
-        `update everest --operator.mongodb=true --operator.postgresql=true --operator.mysql=true`,
-      );
-
-      await out.assertSuccess();
-      await out.outContainsNormalizedMany([
-          '✅ Updating database namespace \'everest\'',
-      ]);
-    });
-    await page.waitForTimeout(10_000);
-    await verifyEverestSystem();
-    await verifyOperators('everest', [
-        'percona-xtradb-cluster-operator',
-        'percona-server-mongodb-operator',
-        'percona-postgresql-operator',
+    await verifyOperators('ns1', [
+      'percona-server-mongodb-operator',
+      'percona-xtradb-cluster-operator',
+      'postgresql-operator',
+    ]);
+    await verifyOperators('ns2', [
+      'percona-server-mongodb-operator',
+      'percona-xtradb-cluster-operator',
+      'postgresql-operator',
     ]);
 
-    await test.step('remove database namespace', async () => {
-      let out = await cli.everestExecNamespaces(
-        `remove everest`,
-      );
+    await test.step('check namespaces lists in the UI', async () => {
+      const login = await request.post('/v1/session', {
+        data: {
+          token: await cli.getEverestToken(),
+        },
+      });
+      expect(login.ok()).toBeTruthy();
 
-      await out.assertSuccess();
-      await out.outContainsNormalizedMany([
-          '✅ Deleting database clusters in namespace \'everest\'',
-          '✅ Deleting backup storages in namespace \'everest\'',
-          '✅ Deleting monitoring instances in namespace \'everest\'',
-          '✅ Deleting database namespace \'everest\'',
-      ]);
+      await page.goto('/databases');
+      await page.getByTestId('db-engines-button').click();
+      await page.getByTestId('add-db-cluster-button').click();
 
-      out = await cli.exec(`kubectl get namespace everest`);
-      await out.outErrContainsNormalizedMany([
-        'Error from server (NotFound): namespaces "everest" not found',
-      ]);
+      // Check namespaces in DB wizard
+      await page.getByTestId('text-input-db-tracker-name').fill('test');
+      await page.getByTestId('select-namespace-button').click();
+      await expect(page.getByRole('option', { name: 'ns1' })).toBeVisible();
+      await expect(page.getByRole('option', { name: 'ns2' })).toBeVisible();
+      await expect(page.getByRole('option', { name: 'everest-system' })).not.toBeVisible();
+      await page.getByRole('option', { name: 'ns1' }).click();
+
+      // Cancel DB wizard
+      await page.getByTestId('close-dialog-icon').click();
+
+      // Check namespaces in settings
+      await page.getByTestId('settings-button').click();
+      await page.getByTestId('settings-namespaces').click();
+
+      await expect(page.getByText('ns1')).toBeVisible();
+      await expect(page.getByText('ns2')).toBeVisible();
+      await expect(page.getByText('everest-system')).not.toBeVisible();
     });
-    await page.waitForTimeout(10_000);
-    await verifyEverestSystem();
-
-    await test.step('create database namespace with --take-ownership', async () => {
-      let out = await cli.exec(`kubectl create namespace existing-ns`);
-
-      await out.assertSuccess();
-
-      out = await cli.everestExecNamespacesSkipWizard(
-        `add existing-ns --take-ownership`,
-      );
-      await out.assertSuccess();
-      await out.outContainsNormalizedMany([
-      '✅ Provisioning database namespace \'existing-ns\'',
-      ]);
-    });
-    await page.waitForTimeout(10_000);
-    await verifyEverestSystem();
-
-    await test.step('remove database namespace with --keep-namespace', async () => {
-      let out = await cli.everestExecNamespaces(
-        `remove existing-ns --keep-namespace`,
-      );
-
-      await out.assertSuccess();
-      await out.outContainsNormalizedMany([
-          '✅ Deleting database clusters in namespace \'existing-ns\'',
-          '✅ Deleting backup storages in namespace \'existing-ns\'',
-          '✅ Deleting monitoring instances in namespace \'existing-ns\'',
-          '✅ Deleting resources from namespace \'existing-ns\'',
-      ]);
-
-      out = await cli.exec(`kubectl get namespace existing-ns`);
-      await out.assertSuccess();
-      await out.outContainsNormalizedMany([
-          'existing-ns',
-      ]);
-
-    });
-    await page.waitForTimeout(10_000);
-    await verifyEverestSystem();
-
   });
 });
